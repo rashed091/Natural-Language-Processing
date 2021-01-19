@@ -21,7 +21,6 @@ torchsummary
 torchtext
 torchvision
 tqdm
-xgboost
 jupyterlab
 stanza
 captum
