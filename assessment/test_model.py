@@ -1,346 +1,225 @@
-"""
-Text classification with the torchtext library
-==================================
-
-In this tutorial, we will show how to use the torchtext library to build the dataset for the text classification analysis. Users will have the flexibility to
-
-   - Access to the raw data as an iterator
-   - Build data processing pipeline to convert the raw text strings into ``torch.Tensor`` that can be used to train the model
-   - Shuffle and iterate the data with `torch.utils.data.DataLoader <https://pytorch.org/docs/stable/data.html?highlight=dataloader#torch.utils.data.DataLoader>`__
-"""
-
-
-######################################################################
-# Access to the raw dataset iterators
-# -----------------------------------
-#
-# The torchtext library provides a few raw dataset iterators, which yield the raw text strings. For example, the ``AG_NEWS`` dataset iterators yield the raw data as a tuple of label and text.
-
 import torch
-from torchtext.datasets import AG_NEWS
-train_iter = AG_NEWS(split='train')
-
-
-######################################################################
-# ::
-#
-#     next(train_iter)
-#     >>> (3, "Wall St. Bears Claw Back Into the Black (Reuters) Reuters -
-#     Short-sellers, Wall Street's dwindling\\band of ultra-cynics, are seeing green
-#     again.")
-#
-#     next(train_iter)
-#     >>> (3, 'Carlyle Looks Toward Commercial Aerospace (Reuters) Reuters - Private
-#     investment firm Carlyle Group,\\which has a reputation for making well-timed
-#     and occasionally\\controversial plays in the defense industry, has quietly
-#     placed\\its bets on another part of the market.')
-#
-#     next(train_iter)
-#     >>> (3, "Oil and Economy Cloud Stocks' Outlook (Reuters) Reuters - Soaring
-#     crude prices plus worries\\about the economy and the outlook for earnings are
-#     expected to\\hang over the stock market next week during the depth of
-#     the\\summer doldrums.")
-#
-
-
-######################################################################
-# Prepare data processing pipelines
-# ---------------------------------
-#
-# We have revisited the very basic components of the torchtext library, including vocab, word vectors, tokenizer. Those are the basic data processing building blocks for raw text string.
-#
-# Here is an example for typical NLP data processing with tokenizer and vocabulary. The first step is to build a vocabulary with the raw training dataset. Here we use built in
-# factory function `build_vocab_from_iterator` which accepts iterator that yield list or iterator of tokens. Users can also pass any special symbols to be added to the
-# vocabulary.
-
-
-from torchtext.data.utils import get_tokenizer
+import torch.nn.functional as F
+from torch import LongTensor
+from torch.nn import Embedding, LSTM
+from torch.autograd import Variable
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 from torchtext.vocab import build_vocab_from_iterator
 
-tokenizer = get_tokenizer('basic_english')
-train_iter = AG_NEWS(split='train')
+# We want to run LSTM on a batch following 3 character sequences
+seqs = ['long_str',  # len = 8
+        'tiny',      # len = 4
+        'medium']    # len = 6
 
-def yield_tokens(data_iter):
-    for _, text in data_iter:
-        yield tokenizer(text)
 
-vocab = build_vocab_from_iterator(yield_tokens(train_iter), specials=["<unk>"])
-vocab.set_default_index(vocab["<unk>"])
+## Step 1: Construct Vocabulary ##
+##------------------------------##
+# make sure <pad> idx is 0
+tokens = [sorted(set([char for seq in seqs for char in seq]))
+# => ['<pad>', '_', 'd', 'e', 'g', 'i', 'l', 'm', 'n', 'o', 'r', 's', 't', 'u', 'y']
 
-######################################################################
-# The vocabulary block converts a list of tokens into integers.
+vocab = build_vocab_from_iterator(tokens, specials=['<unk>', '<pad>', '<bos>', '<eos>'])
+
+PAD_IDX = vocab['<pad>']
+BOS_IDX = vocab['<bos>']
+EOS_IDX = vocab['<eos>']
+UNK_IDX = vocab['<unk>']
+
+vocab.set_default_index(UNK_IDX)
+
+## Step 2: Load indexed data (list of instances, where each instance is list of character indices) ##
+##-------------------------------------------------------------------------------------------------##
+vectorized_seqs = [[vocab.index(tok) for tok in seq]for seq in seqs]
+# vectorized_seqs => [[6, 9, 8, 4, 1, 11, 12, 10],
+#                     [12, 5, 8, 14],
+#                     [7, 3, 2, 5, 13, 7]]
+
+
+## Step 3: Make Model ##
+##--------------------##
+# embed = Embedding(len(vocab), 4) # embedding_dim = 4
+# lstm = LSTM(input_size=4, hidden_size=5, batch_first=True) # input_dim = 4, hidden_dim = 5
+
+
+## Step 4: Pad instances with 0s till max length sequence ##
+##--------------------------------------------------------##
+
+# get the length of each seq in your batch
+# seq_lengths = LongTensor(list(map(len, vectorized_seqs)))
+# seq_lengths => [ 8, 4,  6]
+# batch_sum_seq_len: 8 + 4 + 6 = 18
+# max_seq_len: 8
+
+# seq_tensor = Variable(torch.zeros((len(vectorized_seqs), seq_lengths.max()))).long()
+# seq_tensor => [[0 0 0 0 0 0 0 0]
+#                [0 0 0 0 0 0 0 0]
+#                [0 0 0 0 0 0 0 0]]
+
+# for idx, (seq, seqlen) in enumerate(zip(vectorized_seqs, seq_lengths)):
+    # seq_tensor[idx, :seqlen] = LongTensor(seq)
+# seq_tensor => [[ 6  9  8  4  1 11 12 10]          # long_str
+#                [12  5  8 14  0  0  0  0]          # tiny
+#                [ 7  3  2  5 13  7  0  0]]         # medium
+# seq_tensor.shape : (batch_size X max_seq_len) = (3 X 8)
+
+
+## Step 5: Sort instances by sequence length in descending order ##
+##---------------------------------------------------------------##
+
+# seq_lengths, perm_idx = seq_lengths.sort(0, descending=True)
+# seq_tensor = seq_tensor[perm_idx]
+# seq_tensor => [[ 6  9  8  4  1 11 12 10]           # long_str
+#                [ 7  3  2  5 13  7  0  0]           # medium
+#                [12  5  8 14  0  0  0  0]]          # tiny
+# seq_tensor.shape : (batch_size X max_seq_len) = (3 X 8)
+
+
+## Step 6: Embed the instances ##
+##-----------------------------##
+
+# embedded_seq_tensor = embed(seq_tensor)
+# embedded_seq_tensor =>
+#                       [[[-0.77578706 -1.8080667  -1.1168439   1.1059115 ]     l
+#                         [-0.23622951  2.0361056   0.15435742 -0.04513785]     o
+#                         [-0.6000342   1.1732816   0.19938554 -1.5976517 ]     n
+#                         [ 0.40524676  0.98665565 -0.08621677 -1.1728264 ]     g
+#                         [-1.6334635  -0.6100042   1.7509955  -1.931793  ]     _
+#                         [-0.6470658  -0.6266589  -1.7463604   1.2675372 ]     s
+#                         [ 0.64004815  0.45813003  0.3476034  -0.03451729]     t
+#                         [-0.22739866 -0.45782727 -0.6643252   0.25129375]]    r
+
+#                        [[ 0.16031227 -0.08209462 -0.16297023  0.48121014]     m
+#                         [-0.7303265  -0.857339    0.58913064 -1.1068314 ]     e
+#                         [ 0.48159844 -1.4886451   0.92639893  0.76906884]     d
+#                         [ 0.27616557 -1.224429   -1.342848   -0.7495876 ]     i
+#                         [ 0.01795524 -0.59048957 -0.53800726 -0.6611691 ]     u
+#                         [ 0.16031227 -0.08209462 -0.16297023  0.48121014]     m
+#                         [ 0.2691206  -0.43435425  0.87935454 -2.2269666 ]     <pad>
+#                         [ 0.2691206  -0.43435425  0.87935454 -2.2269666 ]]    <pad>
+
+#                        [[ 0.64004815  0.45813003  0.3476034  -0.03451729]     t
+#                         [ 0.27616557 -1.224429   -1.342848   -0.7495876 ]     i
+#                         [-0.6000342   1.1732816   0.19938554 -1.5976517 ]     n
+#                         [-1.284392    0.68294704  1.4064184  -0.42879772]     y
+#                         [ 0.2691206  -0.43435425  0.87935454 -2.2269666 ]     <pad>
+#                         [ 0.2691206  -0.43435425  0.87935454 -2.2269666 ]     <pad>
+#                         [ 0.2691206  -0.43435425  0.87935454 -2.2269666 ]     <pad>
+#                         [ 0.2691206  -0.43435425  0.87935454 -2.2269666 ]]]   <pad>
+# embedded_seq_tensor.shape : (batch_size X max_seq_len X embedding_dim) = (3 X 8 X 4)
+
+
+## Step 7: Call pack_padded_sequence with embeded instances and sequence lengths ##
+##-------------------------------------------------------------------------------##
+
+# packed_input = pack_padded_sequence(embedded_seq_tensor, seq_lengths.cpu().numpy(), batch_first=True)
+# packed_input (PackedSequence is NamedTuple with 2 attributes: data and batch_sizes
 #
-# ::
+# packed_input.data =>
+#                         [[-0.77578706 -1.8080667  -1.1168439   1.1059115 ]     l
+#                          [ 0.01795524 -0.59048957 -0.53800726 -0.6611691 ]     m
+#                          [-0.6470658  -0.6266589  -1.7463604   1.2675372 ]     t
+#                          [ 0.16031227 -0.08209462 -0.16297023  0.48121014]     o
+#                          [ 0.40524676  0.98665565 -0.08621677 -1.1728264 ]     e
+#                          [-1.284392    0.68294704  1.4064184  -0.42879772]     i
+#                          [ 0.64004815  0.45813003  0.3476034  -0.03451729]     n
+#                          [ 0.27616557 -1.224429   -1.342848   -0.7495876 ]     d
+#                          [ 0.64004815  0.45813003  0.3476034  -0.03451729]     n
+#                          [-0.23622951  2.0361056   0.15435742 -0.04513785]     g
+#                          [ 0.16031227 -0.08209462 -0.16297023  0.48121014]     i
+#                          [-0.22739866 -0.45782727 -0.6643252   0.25129375]]    y
+#                          [-0.7303265  -0.857339    0.58913064 -1.1068314 ]     _
+#                          [-1.6334635  -0.6100042   1.7509955  -1.931793  ]     u
+#                          [ 0.27616557 -1.224429   -1.342848   -0.7495876 ]     s
+#                          [-0.6000342   1.1732816   0.19938554 -1.5976517 ]     m
+#                          [-0.6000342   1.1732816   0.19938554 -1.5976517 ]     t
+#                          [ 0.48159844 -1.4886451   0.92639893  0.76906884]     r
+# packed_input.data.shape : (batch_sum_seq_len X embedding_dim) = (18 X 4)
 #
-#     vocab(['here', 'is', 'an', 'example'])
-#     >>> [475, 21, 30, 5286]
+# packed_input.batch_sizes => [ 3,  3,  3,  3,  2,  2,  1,  1]
+# visualization :
+# l  o  n  g  _  s  t  r   #(long_str)
+# m  e  d  i  u  m         #(medium)
+# t  i  n  y               #(tiny)
+# 3  3  3  3  2  2  1  1   (sum = 18 [batch_sum_seq_len])
+
+
+## Step 8: Forward with LSTM ##
+##---------------------------##
+
+# packed_output, (ht, ct) = lstm(packed_input)
+# packed_output (PackedSequence is NamedTuple with 2 attributes: data and batch_sizes
 #
-# Prepare the text processing pipeline with the tokenizer and vocabulary. The text and label pipelines will be used to process the raw data strings from the dataset iterators.
+# packed_output.data :
+#                          [[-0.00947162  0.07743231  0.20343193  0.29611713  0.07992904]   l
+#                           [ 0.08596145  0.09205993  0.20892891  0.21788561  0.00624391]   o
+#                           [ 0.16861682  0.07807446  0.18812777 -0.01148055 -0.01091915]   n
+#                           [ 0.20994528  0.17932937  0.17748171  0.05025435  0.15717036]   g
+#                           [ 0.01364102  0.11060348  0.14704391  0.24145307  0.12879576]   _
+#                           [ 0.02610307  0.00965587  0.31438383  0.246354    0.08276576]   s
+#                           [ 0.09527554  0.14521319  0.1923058  -0.05925677  0.18633027]   t
+#                           [ 0.09872741  0.13324396  0.19446367  0.4307988  -0.05149471]   r
+#                           [ 0.03895474  0.08449443  0.18839942  0.02205326  0.23149511]   m
+#                           [ 0.14620507  0.07822411  0.2849248  -0.22616537  0.15480657]   e
+#                           [ 0.00884941  0.05762182  0.30557525  0.373712    0.08834908]   d
+#                           [ 0.12460691  0.21189159  0.04823487  0.06384943  0.28563985]   i
+#                           [ 0.01368293  0.15872964  0.03759198 -0.13403234  0.23890573]   u
+#                           [ 0.00377969  0.05943518  0.2961751   0.35107893  0.15148178]   m
+#                           [ 0.00737647  0.17101538  0.28344846  0.18878219  0.20339936]   t
+#                           [ 0.0864429   0.11173367  0.3158251   0.37537992  0.11876849]   i
+#                           [ 0.17885767  0.12713005  0.28287745  0.05562563  0.10871304]   n
+#                           [ 0.09486895  0.12772645  0.34048414  0.25930756  0.12044918]]  y
+# packed_output.data.shape : (batch_sum_seq_len X hidden_dim) = (18 X 5)
 
-text_pipeline = lambda x: vocab(tokenizer(x))
-label_pipeline = lambda x: int(x) - 1
-
-
-######################################################################
-# The text pipeline converts a text string into a list of integers based on the lookup table defined in the vocabulary. The label pipeline converts the label into integers. For example,
-#
-# ::
-#
-#     text_pipeline('here is the an example')
-#     >>> [475, 21, 2, 30, 5286]
-#     label_pipeline('10')
-#     >>> 9
-#
-
-
-
-######################################################################
-# Generate data batch and iterator
-# --------------------------------
-#
-# `torch.utils.data.DataLoader <https://pytorch.org/docs/stable/data.html?highlight=dataloader#torch.utils.data.DataLoader>`__
-# is recommended for PyTorch users (a tutorial is `here <https://pytorch.org/tutorials/beginner/data_loading_tutorial.html>`__).
-# It works with a map-style dataset that implements the ``getitem()`` and ``len()`` protocols, and represents a map from indices/keys to data samples. It also works with an iterable dataset with the shuffle argument of ``False``.
-#
-# Before sending to the model, ``collate_fn`` function works on a batch of samples generated from ``DataLoader``. The input to ``collate_fn`` is a batch of data with the batch size in ``DataLoader``, and ``collate_fn`` processes them according to the data processing pipelines declared previously. Pay attention here and make sure that ``collate_fn`` is declared as a top level def. This ensures that the function is available in each worker.
-#
-# In this example, the text entries in the original data batch input are packed into a list and concatenated as a single tensor for the input of ``nn.EmbeddingBag``. The offset is a tensor of delimiters to represent the beginning index of the individual sequence in the text tensor. Label is a tensor saving the labels of individual text entries.
+# packed_output.batch_sizes => [ 3,  3,  3,  3,  2,  2,  1,  1] (same as packed_input.batch_sizes)
+# visualization :
+# l  o  n  g  _  s  t  r   #(long_str)
+# m  e  d  i  u  m         #(medium)
+# t  i  n  y               #(tiny)
+# 3  3  3  3  2  2  1  1   (sum = 18 [batch_sum_seq_len])
 
 
-from torch.utils.data import DataLoader
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+## Step 9: Call unpack_padded_sequences if required / or just pick last hidden vector ##
+##------------------------------------------------------------------------------------##
 
-def collate_batch(batch):
-    label_list, text_list, offsets = [], [], [0]
-    for (_label, _text) in batch:
-         label_list.append(label_pipeline(_label))
-         processed_text = torch.tensor(text_pipeline(_text), dtype=torch.int64)
-         text_list.append(processed_text)
-         offsets.append(processed_text.size(0))
-    label_list = torch.tensor(label_list, dtype=torch.int64)
-    offsets = torch.tensor(offsets[:-1]).cumsum(dim=0)
-    text_list = torch.cat(text_list)
-    return label_list.to(device), text_list.to(device), offsets.to(device)
+# unpack your output if required
+# output, input_sizes = pad_packed_sequence(packed_output, batch_first=True)
+# output:
+# output =>
+#                          [[[-0.00947162  0.07743231  0.20343193  0.29611713  0.07992904]   l
+#                            [ 0.20994528  0.17932937  0.17748171  0.05025435  0.15717036]   o
+#                            [ 0.09527554  0.14521319  0.1923058  -0.05925677  0.18633027]   n
+#                            [ 0.14620507  0.07822411  0.2849248  -0.22616537  0.15480657]   g
+#                            [ 0.01368293  0.15872964  0.03759198 -0.13403234  0.23890573]   _
+#                            [ 0.00737647  0.17101538  0.28344846  0.18878219  0.20339936]   s
+#                            [ 0.17885767  0.12713005  0.28287745  0.05562563  0.10871304]   t
+#                            [ 0.09486895  0.12772645  0.34048414  0.25930756  0.12044918]]  r
 
-train_iter = AG_NEWS(split='train')
-dataloader = DataLoader(train_iter, batch_size=8, shuffle=False, collate_fn=collate_batch)
+#                           [[ 0.08596145  0.09205993  0.20892891  0.21788561  0.00624391]   m
+#                            [ 0.01364102  0.11060348  0.14704391  0.24145307  0.12879576]   e
+#                            [ 0.09872741  0.13324396  0.19446367  0.4307988  -0.05149471]   d
+#                            [ 0.00884941  0.05762182  0.30557525  0.373712    0.08834908]   i
+#                            [ 0.00377969  0.05943518  0.2961751   0.35107893  0.15148178]   u
+#                            [ 0.0864429   0.11173367  0.3158251   0.37537992  0.11876849]   m
+#                            [ 0.          0.          0.          0.          0.        ]   <pad>
+#                            [ 0.          0.          0.          0.          0.        ]]  <pad>
 
+#                           [[ 0.16861682  0.07807446  0.18812777 -0.01148055 -0.01091915]   t
+#                            [ 0.02610307  0.00965587  0.31438383  0.246354    0.08276576]   i
+#                            [ 0.03895474  0.08449443  0.18839942  0.02205326  0.23149511]   n
+#                            [ 0.12460691  0.21189159  0.04823487  0.06384943  0.28563985]   y
+#                            [ 0.          0.          0.          0.          0.        ]   <pad>
+#                            [ 0.          0.          0.          0.          0.        ]   <pad>
+#                            [ 0.          0.          0.          0.          0.        ]   <pad>
+#                            [ 0.          0.          0.          0.          0.        ]]] <pad>
+# output.shape : ( batch_size X max_seq_len X hidden_dim) = (3 X 8 X 5)
 
-######################################################################
-# Define the model
-# ----------------
-#
-# The model is composed of the `nn.EmbeddingBag <https://pytorch.org/docs/stable/nn.html?highlight=embeddingbag#torch.nn.EmbeddingBag>`__ layer plus a linear layer for the classification purpose. ``nn.EmbeddingBag`` with the default mode of "mean" computes the mean value of a “bag” of embeddings. Although the text entries here have different lengths, nn.EmbeddingBag module requires no padding here since the text lengths are saved in offsets.
-#
-# Additionally, since ``nn.EmbeddingBag`` accumulates the average across
-# the embeddings on the fly, ``nn.EmbeddingBag`` can enhance the
-# performance and memory efficiency to process a sequence of tensors.
-#
-# .. image:: ../_static/img/text_sentiment_ngrams_model.png
-#
+# Or if you just want the final hidden state?
+# print(ht[-1])
 
-from torch import nn
+## Summary of Shape Transformations ##
+##----------------------------------##
 
-class TextClassificationModel(nn.Module):
-
-    def __init__(self, vocab_size, embed_dim, num_class):
-        super(TextClassificationModel, self).__init__()
-        self.embedding = nn.EmbeddingBag(vocab_size, embed_dim, sparse=True)
-        self.fc = nn.Linear(embed_dim, num_class)
-        self.init_weights()
-
-    def init_weights(self):
-        initrange = 0.5
-        self.embedding.weight.data.uniform_(-initrange, initrange)
-        self.fc.weight.data.uniform_(-initrange, initrange)
-        self.fc.bias.data.zero_()
-
-    def forward(self, text, offsets):
-        embedded = self.embedding(text, offsets)
-        print('Embedding Shape:', embedded.shape)
-        return self.fc(embedded)
-
-
-######################################################################
-# Initiate an instance
-# --------------------
-#
-# The ``AG_NEWS`` dataset has four labels and therefore the number of classes is four.
-#
-# ::
-#
-#    1 : World
-#    2 : Sports
-#    3 : Business
-#    4 : Sci/Tec
-#
-# We build a model with the embedding dimension of 64. The vocab size is equal to the length of the vocabulary instance. The number of classes is equal to the number of labels,
-#
-
-train_iter = AG_NEWS(split='train')
-num_class = len(set([label for (label, text) in train_iter]))
-vocab_size = len(vocab)
-emsize = 64
-model = TextClassificationModel(vocab_size, emsize, num_class).to(device)
-
-
-######################################################################
-# Define functions to train the model and evaluate results.
-# ---------------------------------------------------------
-#
-
-
-import time
-
-def train(dataloader):
-    model.train()
-    total_acc, total_count = 0, 0
-    log_interval = 500
-    start_time = time.time()
-
-    for idx, (label, text, offsets) in enumerate(dataloader):
-        print('Label shape: '.format(label))
-        optimizer.zero_grad()
-        predicted_label = model(text, offsets)
-        print('Predicted label shape: '.format(predicted_label))
-        loss = criterion(predicted_label, label)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-        optimizer.step()
-        total_acc += (predicted_label.argmax(1) == label).sum().item()
-        total_count += label.size(0)
-        if idx % log_interval == 0 and idx > 0:
-            elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches '
-                  '| accuracy {:8.3f}'.format(epoch, idx, len(dataloader),
-                                              total_acc/total_count))
-            total_acc, total_count = 0, 0
-            start_time = time.time()
-
-def evaluate(dataloader):
-    model.eval()
-    total_acc, total_count = 0, 0
-
-    with torch.no_grad():
-        for idx, (label, text, offsets) in enumerate(dataloader):
-            predicted_label = model(text, offsets)
-            loss = criterion(predicted_label, label)
-            total_acc += (predicted_label.argmax(1) == label).sum().item()
-            total_count += label.size(0)
-    return total_acc/total_count
-
-
-######################################################################
-# Split the dataset and run the model
-# -----------------------------------
-#
-# Since the original ``AG_NEWS`` has no valid dataset, we split the training
-# dataset into train/valid sets with a split ratio of 0.95 (train) and
-# 0.05 (valid). Here we use
-# `torch.utils.data.dataset.random_split <https://pytorch.org/docs/stable/data.html?highlight=random_split#torch.utils.data.random_split>`__
-# function in PyTorch core library.
-#
-# `CrossEntropyLoss <https://pytorch.org/docs/stable/nn.html?highlight=crossentropyloss#torch.nn.CrossEntropyLoss>`__
-# criterion combines ``nn.LogSoftmax()`` and ``nn.NLLLoss()`` in a single class.
-# It is useful when training a classification problem with C classes.
-# `SGD <https://pytorch.org/docs/stable/_modules/torch/optim/sgd.html>`__
-# implements stochastic gradient descent method as the optimizer. The initial
-# learning rate is set to 5.0.
-# `StepLR <https://pytorch.org/docs/master/_modules/torch/optim/lr_scheduler.html#StepLR>`__
-# is used here to adjust the learning rate through epochs.
-#
-
-
-from torch.utils.data.dataset import random_split
-from torchtext.data.functional import to_map_style_dataset
-# Hyperparameters
-EPOCHS = 10 # epoch
-LR = 5  # learning rate
-BATCH_SIZE = 64 # batch size for training
-
-criterion = torch.nn.CrossEntropyLoss()
-optimizer = torch.optim.SGD(model.parameters(), lr=LR)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.1)
-total_accu = None
-train_iter, test_iter = AG_NEWS()
-train_dataset = to_map_style_dataset(train_iter)
-test_dataset = to_map_style_dataset(test_iter)
-num_train = int(len(train_dataset) * 0.95)
-split_train_, split_valid_ = \
-    random_split(train_dataset, [num_train, len(train_dataset) - num_train])
-
-train_dataloader = DataLoader(split_train_, batch_size=BATCH_SIZE,
-                              shuffle=True, collate_fn=collate_batch)
-valid_dataloader = DataLoader(split_valid_, batch_size=BATCH_SIZE,
-                              shuffle=True, collate_fn=collate_batch)
-test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE,
-                             shuffle=True, collate_fn=collate_batch)
-
-for epoch in range(1, EPOCHS + 1):
-    epoch_start_time = time.time()
-    train(train_dataloader)
-    accu_val = evaluate(valid_dataloader)
-    if total_accu is not None and total_accu > accu_val:
-      scheduler.step()
-    else:
-       total_accu = accu_val
-    print('-' * 59)
-    print('| end of epoch {:3d} | time: {:5.2f}s | '
-          'valid accuracy {:8.3f} '.format(epoch,
-                                           time.time() - epoch_start_time,
-                                           accu_val))
-    print('-' * 59)
-
-
-
-######################################################################
-# Evaluate the model with test dataset
-# ------------------------------------
-#
-
-
-
-######################################################################
-# Checking the results of the test dataset…
-
-#print('Checking the results of test dataset.')
-#accu_test = evaluate(test_dataloader)
-#print('test accuracy {:8.3f}'.format(accu_test))
-
-
-
-
-######################################################################
-# Test on a random news
-# ---------------------
-#
-# Use the best model so far and test a golf news.
-#
-
-
-# ag_news_label = {1: "World",
-#                  2: "Sports",
-#                  3: "Business",
-#                  4: "Sci/Tec"}
-
-# def predict(text, text_pipeline):
-#     with torch.no_grad():
-#         text = torch.tensor(text_pipeline(text))
-#         output = model(text, torch.tensor([0]))
-#         return output.argmax(1).item() + 1
-
-# ex_text_str = "MEMPHIS, Tenn. – Four days ago, Jon Rahm was \
-#     enduring the season’s worst weather conditions on Sunday at The \
-#     Open on his way to a closing 75 at Royal Portrush, which \
-#     considering the wind and the rain was a respectable showing. \
-#     Thursday’s first round at the WGC-FedEx St. Jude Invitational \
-#     was another story. With temperatures in the mid-80s and hardly any \
-#     wind, the Spaniard was 13 strokes better in a flawless round. \
-#     Thanks to his best putting performance on the PGA Tour, Rahm \
-#     finished with an 8-under 62 for a three-stroke lead, which \
-#     was even more impressive considering he’d never played the \
-#     front nine at TPC Southwind."
-
-# model = model.to("cpu")
-
-# print("This is a %s news" %ag_news_label[predict(ex_text_str, text_pipeline)])
+# (batch_size X max_seq_len X embedding_dim) --> Sort by seqlen ---> (batch_size X max_seq_len X embedding_dim)
+# (batch_size X max_seq_len X embedding_dim) --->      Pack     ---> (batch_sum_seq_len X embedding_dim)
+# (batch_sum_seq_len X embedding_dim)        --->      LSTM     ---> (batch_sum_seq_len X hidden_dim)
+# (batch_sum_seq_len X hidden_dim)           --->    UnPack     ---> (batch_size X max_seq_len X hidden_dim)
