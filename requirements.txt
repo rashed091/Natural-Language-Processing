@@ -1,20 +1,10 @@
-pyro-ppl
-numpyro
-pymc3
-flair
-gensim
 spacy
-stanza
-gym
 jupyter
 jupyterlab
 matplotlib
-seaborn
 numpy
 scipy
 pandas
-modin[dask]
-scikit-image
 scikit-learn
 torch
 torchfile
@@ -22,6 +12,5 @@ torchsummary
 torchtext
 torchvision
 transformers
-kornia
 captum
 pip-review
