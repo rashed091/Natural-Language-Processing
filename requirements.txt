@@ -8,4 +8,5 @@ torchfile
 torchsummary
 torchtext
 captum
+scikit-learn
 pip-review
